@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>DOM 3D Engine - White Theme</title>
+    <style>
+        body {
+            background-color: #f4f4f4; /* 少し落ち着いた白 */
+            color: #333; /* 文字は真っ黒ではなく濃いグレー */
+            margin: 0;
+            height: 100vh;
+            overflow: hidden;
+            font-family: 'Helvetica Neue', Arial, sans-serif; /* クリーンなフォントに変更 */
+            user-select: none;
+        }
+
+        #viewport {
+            width: 100%;
+            height: 100%;
+            position: relative;
+            cursor: grab;
+            perspective: 1000px;
+            overflow: hidden;
+            background: radial-gradient(circle, #ffffff 0%, #e0e0e0 100%); /* 立体感を出すグラデーション */
+        }
+        #viewport:active {
+            cursor: grabbing;
+        }
+
+        /* ポリゴン（再利用プール） */
+        .poly {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            transform-origin: 0 0; 
+            will-change: clip-path, background-color;
+            pointer-events: none;
+        }
+
+        /* コントロールパネル */
+        #ui {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            width: 260px;
+            background: rgba(255, 255, 255, 0.9); /* 半透明の白 */
+            border: 1px solid #ccc;
+            border-radius: 8px; /* 角丸 */
+            padding: 20px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1); /* 柔らかい影 */
+            z-index: 1000;
+            backdrop-filter: blur(5px);
+        }
+
+        .control-group { margin-bottom: 15px; }
+        label { display: block; font-size: 11px; font-weight: bold; margin-bottom: 5px; color: #555; text-transform: uppercase; letter-spacing: 1px; }
+        
+        /* スライダーのデザイン調整 */
+        input[type="range"] {
+            width: 100%;
+            cursor: pointer;
+            accent-color: #333; /* スライダーの色 */
+        }
+        
+        .stat-row { display: flex; justify-content: space-between; font-size: 12px; color: #666; margin-top: 4px;}
+        h1 { 
+            margin: 0 0 15px 0; 
+            font-size: 18px; 
+            border-bottom: 2px solid #333; 
+            padding-bottom: 10px; 
+            letter-spacing: 1px;
+        }
+
+        /* モード切替ボタン */
+        .btn-group { display: flex; gap: 8px; margin-top: 15px; }
+        button {
+            flex: 1;
+            background: #fff;
+            color: #333;
+            border: 1px solid #ccc;
+            padding: 8px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 12px;
+            font-weight: bold;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+        button:hover { background: #eee; }
+        button.active { 
+            background: #333; 
+            color: #fff; 
+            border-color: #333; 
+        }
+    </style>
+</head>
+<body>
+
+<div id="ui">
+    <h1>DOM 3D Engine</h1>
+    
+    <div class="control-group">
+        <label>メイン半径 (R)</label>
+        <input type="range" id="input-R" min="50" max="250" value="150">
+    </div>
+    <div class="control-group">
+        <label>チューブ半径 (r)</label>
+        <input type="range" id="input-r" min="10" max="100" value="60">
+    </div>
+    <div class="control-group">
+        <label>光源の向き</label>
+        <input type="range" id="input-light" min="0" max="6.28" step="0.1" value="0">
+    </div>
+
+    <div class="btn-group">
+        <button id="btn-solid" class="active">ソリッド</button>
+        <button id="btn-wire">ワイヤー</button>
+    </div>
+
+    <hr style="border-color: #eee; margin: 20px 0;">
+    
+    <div class="stat-row"><span>ポリゴン数:</span> <span id="stat-poly">0</span></div>
+    <div class="stat-row"><span>FPS:</span> <span id="stat-fps">0</span></div>
+    <div class="stat-row" style="margin-top:10px; font-size:10px; color:#999; text-align:center; display:block;">
+        (スクロールで拡大縮小)
+    </div>
+</div>
+
+<div id="viewport">
+    <!-- ここにポリゴン（DIV要素）が生成されます -->
+</div>
+
+<script>
+/**
+ * 数学ライブラリ (コア)
+ * 基本的な3次元ベクトル演算クラス
+ */
+class Vec3 {
+    constructor(x, y, z) { this.x = x; this.y = y; this.z = z; }
+    add(v) { return new Vec3(this.x + v.x, this.y + v.y, this.z + v.z); }
+    sub(v) { return new Vec3(this.x - v.x, this.y - v.y, this.z - v.z); }
+    normalize() {
+        const len = Math.sqrt(this.x*this.x + this.y*this.y + this.z*this.z) || 1;
+        return new Vec3(this.x/len, this.y/len, this.z/len);
+    }
+    dot(v) { return this.x*v.x + this.y*v.y + this.z*v.z; }
+    cross(v) {
+        return new Vec3(this.y * v.z - this.z * v.y, this.z * v.x - this.x * v.z, this.x * v.y - this.y * v.x);
+    }
+}
+
+/**
+ * 設定と状態管理
+ */
+const CONFIG = {
+    R: 150, // メインの半径（大円）
+    r: 60,  // チューブの半径（小円）
+    N: 24,  // 分割数 (大円方向) - パフォーマンスに影響
+    n: 12,  // 分割数 (チューブ方向) - パフォーマンスに影響
+    fov: 800, // 視野角（焦点距離）
+    zoom: 1.0,
+    mode: 'solid' // 'solid' または 'wire'
+};
+
+const STATE = {
+    rotation: { x: 0.5, y: 0.5 },       // 現在の回転角
+    targetRotation: { x: 0.5, y: 0.5 }, // 目標回転角（慣性用）
+    isDragging: false,
+    lastMouse: { x: 0, y: 0 },
+    lightAngle: 0
+};
+
+// DOM要素の取得
+const viewport = document.getElementById('viewport');
+const domPool = [];
+const MAX_POLYS = 1500; // DOM要素数の上限（安全策）
+
+// DOMプールの初期化
+// パフォーマンス向上のため、要素を生成・削除するのではなく再利用する
+for(let i=0; i<MAX_POLYS; i++){
+    const div = document.createElement('div');
+    div.className = 'poly';
+    div.style.display = 'none'; // 初期状態は非表示
+    viewport.appendChild(div);
+    domPool.push(div);
+}
+
+// モデルデータ
+let mesh = { vertices: [], faces: [] };
+
+/**
+ * メッシュ生成 (トーラス形状)
+ * パラメータに基づいて頂点と面を計算する
+ */
+function generateMesh() {
+    const vertices = [];
+    const faces = [];
+    const { R, r, N, n } = CONFIG;
+
+    // 頂点の生成
+    for (let i = 0; i < N; i++) {
+        const theta = (Math.PI * 2 * i) / N;
+        for (let j = 0; j < n; j++) {
+            const phi = (Math.PI * 2 * j) / n;
+            const x = (R + r * Math.cos(phi)) * Math.cos(theta);
+            const y = (R + r * Math.cos(phi)) * Math.sin(theta);
+            const z = r * Math.sin(phi);
+            vertices.push(new Vec3(x, y, z));
+        }
+    }
+
+    // 面（ポリゴン）の生成
+    for (let i = 0; i < N; i++) {
+        for (let j = 0; j < n; j++) {
+            const i_next = (i + 1) % N;
+            const j_next = (j + 1) % n;
+            const p1 = i * n + j;
+            const p2 = i_next * n + j;
+            const p3 = i_next * n + j_next;
+            const p4 = i * n + j_next;
+            
+            // 四角形を2つの三角形に分割
+            faces.push([p1, p2, p3]);
+            faces.push([p1, p3, p4]);
+        }
+    }
+    mesh = { vertices, faces };
+    document.getElementById('stat-poly').innerText = faces.length;
+}
+
+generateMesh();
+
+/**
+ * 入力処理 (イベントリスナー)
+ */
+// UI入力
+document.getElementById('input-R').addEventListener('input', (e) => { CONFIG.R = parseFloat(e.target.value); generateMesh(); });
+document.getElementById('input-r').addEventListener('input', (e) => { CONFIG.r = parseFloat(e.target.value); generateMesh(); });
+document.getElementById('input-light').addEventListener('input', (e) => { STATE.lightAngle = parseFloat(e.target.value); });
+
+// モード切替ボタン
+document.getElementById('btn-solid').addEventListener('click', (e) => {
+    CONFIG.mode = 'solid';
+    e.target.classList.add('active');
+    document.getElementById('btn-wire').classList.remove('active');
+});
+document.getElementById('btn-wire').addEventListener('click', (e) => {
+    CONFIG.mode = 'wire';
+    e.target.classList.add('active');
+    document.getElementById('btn-solid').classList.remove('active');
+});
+
+// マウス操作（回転）
+viewport.addEventListener('mousedown', (e) => {
+    STATE.isDragging = true;
+    STATE.lastMouse = { x: e.clientX, y: e.clientY };
+});
+window.addEventListener('mouseup', () => STATE.isDragging = false);
+window.addEventListener('mousemove', (e) => {
+    if (!STATE.isDragging) return;
+    const dx = e.clientX - STATE.lastMouse.x;
+    const dy = e.clientY - STATE.lastMouse.y;
+    STATE.targetRotation.y += dx * 0.01;
+    STATE.targetRotation.x += dy * 0.01; 
+    STATE.lastMouse = { x: e.clientX, y: e.clientY };
+});
+
+// マウスホイール（ズーム）
+viewport.addEventListener('wheel', (e) => {
+    CONFIG.zoom += e.deltaY * -0.001;
+    CONFIG.zoom = Math.max(0.1, Math.min(CONFIG.zoom, 5.0));
+});
+
+/**
+ * 描画ループ
+ * 毎フレーム実行されるメイン処理
+ */
+let frameCount = 0;
+let lastTime = performance.now();
+
+function render() {
+    // 回転の慣性処理（スムーズな動き）
+    STATE.rotation.x += (STATE.targetRotation.x - STATE.rotation.x) * 0.1;
+    STATE.rotation.y += (STATE.targetRotation.y - STATE.rotation.y) * 0.1;
+
+    // 回転行列の計算（事前計算）
+    const cosX = Math.cos(STATE.rotation.x), sinX = Math.sin(STATE.rotation.x);
+    const cosY = Math.cos(STATE.rotation.y), sinY = Math.sin(STATE.rotation.y);
+    
+    // 光源ベクトル（UI操作により回転）
+    const lightDir = new Vec3(Math.sin(STATE.lightAngle), 0, -Math.cos(STATE.lightAngle)).normalize();
+
+    // 画面中央座標
+    const cx = window.innerWidth / 2;
+    const cy = window.innerHeight / 2;
+
+    const renderBuffer = [];
+
+    // --- 頂点変換パイプライン ---
+    // 全頂点を回転・移動させる
+    const transformedVerts = mesh.vertices.map(v => {
+        // X軸回転
+        let y = v.y * cosX - v.z * sinX;
+        let z = v.y * sinX + v.z * cosX;
+        let x = v.x;
+        // Y軸回転
+        let tx = x * cosY - z * sinY;
+        z = x * sinY + z * cosY;
+        x = tx;
+        return new Vec3(x, y, z);
+    });
+
+    // --- 面の処理 ---
+    for (let i = 0; i < mesh.faces.length; i++) {
+        const [i1, i2, i3] = mesh.faces[i];
+        const v1 = transformedVerts[i1];
+        const v2 = transformedVerts[i2];
+        const v3 = transformedVerts[i3];
+
+        // 法線ベクトルの計算
+        const edge1 = v2.sub(v1);
+        const edge2 = v3.sub(v1);
+        const normal = edge1.cross(edge2).normalize();
+
+        // 背面カリング（裏側の面を描画しない）
+        if (normal.z < 0) continue;
+
+        // ライティング計算
+        let intensity = normal.dot(lightDir);
+        // 環境光（最低限の明るさ）
+        intensity = Math.max(0.1, intensity); 
+
+        // 投影変換（3D座標 -> 2Dスクリーン座標）
+        const project = (v) => {
+            const scale = (CONFIG.fov * CONFIG.zoom) / (CONFIG.fov + v.z + 500);
+            return {
+                x: v.x * scale + cx,
+                y: v.y * scale + cy,
+                z: v.z // ソート用にZ値を保持
+            };
+        };
+
+        const p1 = project(v1);
+        const p2 = project(v2);
+        const p3 = project(v3);
+
+        // ソートキー（重心のZ深度）
+        const zDepth = (p1.z + p2.z + p3.z) / 3;
+
+        renderBuffer.push({
+            p1, p2, p3,
+            intensity,
+            z: zDepth
+        });
+    }
+
+    // --- Zソート (画商アルゴリズム) ---
+    // 奥にある面から順に描画する
+    renderBuffer.sort((a, b) => b.z - a.z);
+
+    // --- DOMへのラスタライズ ---
+    
+    // 使わない要素を非表示にする
+    for (let i = renderBuffer.length; i < MAX_POLYS; i++) {
+        if (domPool[i].style.display !== 'none') domPool[i].style.display = 'none';
+    }
+
+    // アクティブな要素を更新
+    for (let i = 0; i < renderBuffer.length; i++) {
+        if (i >= MAX_POLYS) break;
+        
+        const face = renderBuffer[i];
+        const div = domPool[i];
+
+        div.style.display = 'block';
+        
+        // CSSの clip-path を使って三角形を描画
+        // ピクセル単位で指定
+        div.style.clipPath = `polygon(${face.p1.x.toFixed(1)}px ${face.p1.y.toFixed(1)}px, ${face.p2.x.toFixed(1)}px ${face.p2.y.toFixed(1)}px, ${face.p3.x.toFixed(1)}px ${face.p3.y.toFixed(1)}px)`;
+        
+        div.style.zIndex = i;
+
+        // 色とモードの処理
+        if (CONFIG.mode === 'solid') {
+            // 白背景用デザイン：明るいほど白く、暗いほど黒く（グレー階調）
+            // 完全に真っ白だと背景に溶け込むため、少しグレーを入れる
+            const val = Math.floor(face.intensity * 180) + 40; 
+            div.style.backgroundColor = `rgb(${val}, ${val}, ${val})`; // モノクロ
+            
+            // クールな青系にする場合はこちらを使用:
+            // div.style.backgroundColor = `rgb(${20}, ${val/1.5 + 20}, ${val + 50})`;
+        } else {
+            // ワイヤーフレームモード
+            // 背景が白なので、薄い黒で表現する
+            div.style.backgroundColor = `rgba(0, 0, 0, 0.1)`;
+        }
+    }
+
+    // 統計情報の更新 (FPS計算)
+    frameCount++;
+    const now = performance.now();
+    if (now - lastTime >= 1000) {
+        document.getElementById('stat-fps').innerText = frameCount;
+        frameCount = 0;
+        lastTime = now;
+    }
+
+    requestAnimationFrame(render);
+}
+
+// 描画開始
+render();
+</script>
+</body>
+</html>
