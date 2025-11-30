@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>WTFhtmlRender</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background-color: #fafafa;
+            padding: 20px;
+        }
+
+        .container {
+            display: flex;
+            gap: 40px; 
+            align-items: flex-start;
+        }
+        
+        .column {
+            flex: 1;
+            min-width: 0; 
+        }
+        
+        #source-column {
+            flex-grow: 0; 
+            flex-shrink: 0;
+            flex-basis: 400px;
+        }
+
+        #render-target {
+            padding: 20px;
+            background-color: #f0f0f0;
+            border: 2px solid #333;
+            width: 100%; 
+            box-sizing: border-box;
+        }
+        
+        h1, h2, h3, h4 {
+            margin-top: 0; 
+        }
+
+        h1, h2, h3 {
+            border-bottom: 2px solid #ddd;
+            padding-bottom: 5px;
+            margin-bottom: 1em;
+        }
+
+        h1 {
+            color: #d9534f;
+        }
+
+        p {
+            color: #0275d8;
+            margin-top: 0;
+        }
+        
+        .description {
+            background-color: #e9ecef;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 20px;
+            color: #495057;
+        }
+        .description p {
+            color: inherit; 
+            font-size: 14px;
+            line-height: 1.8;
+        }
+
+        button {
+            padding: 10px 15px;
+            font-size: 16px;
+            cursor: pointer;
+            background-color: #5cb85c;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            margin-top: 10px;
+        }
+        button:hover {
+            background-color: #4cae4c;
+        }
+        
+        #pixel-grid {
+            display: grid; 
+            border: 2px solid #333;
+            background-color: #f0f0f0;
+        }
+        
+        .pixel {
+            width: 1px;
+            height: 1px;
+        }
+        
+        #source-canvas {
+            display: none;
+        }
+        
+        #fps-counter {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            padding: 5px 10px;
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            border-radius: 3px;
+            font-family: monospace;
+            z-index: 1000;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="fps-counter">FPS: ...</div>
+
+    <div class="container">
+        <div class="column" id="source-column">
+            <h3>1. 描画対象のHTML要素</h3>
+            <div id="render-target">
+                <h1>Hello, WTFRender!</h1>
+                <p>下のボタンを押すと、このHTML要素がピクセル単位のdivで再描画されます。</p>
+                <button onclick="wtfRender()">Render!</button>
+            </div>
+        
+            <div class="description">
+                <h4>処理の概要</h4>
+                <p>
+                    ステップ1：上の#render-target要素をhtml2canvasで#source-canvasに映します<br>
+                    ステップ2：#source-canvasと同じサイズの1px四方のdiv要素を#pixel-gridに生成します<br>
+                    ステップ3：#source-canvasの各ピクセルの色を、対応するdiv要素の背景色に設定します<br>
+                    ステップ4：結果として#render-targetの見た目が#pixel-grid上で再現されます<br>
+                    <br>
+                    開発者ツールで#pixel-gridの中身を見ると、膨大な数のdivが生成されているのが分かります。まさに終わっている実装です！
+                </p>
+            </div>
+        </div>
+
+        <div class="column" id="result-column">
+            <h2>2. レンダリング結果</h2>
+            <div id="pixel-grid"></div>
+        </div>
+    </div>
+    
+    <canvas id="source-canvas"></canvas>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script>
+        async function wtfRender() {
+            const targetElement = document.getElementById('render-target');
+            const gridContainer = document.getElementById('pixel-grid');
+            const canvas = document.getElementById('source-canvas');
+            const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+            console.log("レンダリングを開始します...");
+            
+            const generatedCanvas = await html2canvas(targetElement, { scale: 1 });
+            const width = generatedCanvas.width;
+            const height = generatedCanvas.height;
+            
+            canvas.width = width;
+            canvas.height = height;
+            ctx.drawImage(generatedCanvas, 0, 0);
+
+            gridContainer.style.width = `${width}px`;
+            gridContainer.style.height = `${height}px`;
+            gridContainer.style.gridTemplateColumns = `repeat(${width}, 1px)`;
+
+            gridContainer.innerHTML = '';
+            
+            const fragment = document.createDocumentFragment();
+
+            const imageData = ctx.getImageData(0, 0, width, height).data;
+            for (let i = 0; i < imageData.length; i += 4) {
+                const r = imageData[i];
+                const g = imageData[i + 1];
+                const b = imageData[i + 2];
+                const a = imageData[i + 3];
+
+                const pixelDiv = document.createElement('div');
+                pixelDiv.className = 'pixel';
+                
+                if (a > 0) {
+                    pixelDiv.style.backgroundColor = `rgb(${r}, ${g}, ${b})`;
+                }
+                fragment.appendChild(pixelDiv);
+            }
+            
+            gridContainer.appendChild(fragment);
+
+            console.log(`描画完了！ ${width * height}個のDIVを生成しました。WTF!`);
+        }
+        
+        // FPSカウンター
+        const fpsCounter = document.getElementById('fps-counter');
+        let lastTime = performance.now();
+        let frameCount = 0;
+
+        function updateFPS() {
+            const now = performance.now();
+            frameCount++;
+            if (now - lastTime > 1000) {
+                const fps = Math.round((frameCount * 1000) / (now - lastTime));
+                fpsCounter.textContent = `FPS: ${fps}`;
+                frameCount = 0;
+                lastTime = now;
+            }
+            requestAnimationFrame(updateFPS);
+        }
+        
+        requestAnimationFrame(updateFPS);
+
+        document.addEventListener('DOMContentLoaded', () => {
+             wtfRender();
+        });
+    </script>
+</body>
+</html>
